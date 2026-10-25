@@ -619,6 +619,34 @@ class BestWeights:
         return _CB()
 
 
+PROGRESS = True   # --quiet turns the per-epoch progress lines off
+
+
+def progress_cb(label: str, epochs: int):
+    """Keras callback that logs loss / val_loss a few times per fit. Read-only: no effect on training."""
+    keras = _keras()
+    every = max(1, epochs // 4)
+
+    class _CB(keras.callbacks.Callback):
+        def on_train_begin(self, logs=None):
+            self.t0, self.last = time.perf_counter(), 0
+
+        def on_epoch_end(self, epoch, logs=None):
+            self.last = e = epoch + 1
+            if e % every and e != epochs and e != 1:
+                return
+            logs = logs or {}
+            vl = f"  val_loss={logs['val_loss']:.5f}" if "val_loss" in logs else ""
+            LOG.info(f"    {label:20s} epoch {e:3d}/{epochs}  loss={logs.get('loss', float('nan')):.5f}{vl}"
+                     f"  {time.perf_counter() - self.t0:6.1f}s")
+
+        def on_train_end(self, logs=None):
+            if self.last != epochs:
+                LOG.info(f"    {label:20s} early stop at epoch {self.last}/{epochs}")
+
+    return [_CB()] if PROGRESS else []
+
+
 def build_base(kind: str, units: int, input_shape, lr: float):
     keras = _keras()
     L = keras.layers
@@ -658,6 +686,7 @@ def fit_base(kind: str, units: int, sp: Split, cfg: TrainCfg,
     ty = sp.train_y if train_y is None else train_y
     m = build_base(kind, units, tx.shape[1:], cfg.lr)
     cbs = [BestWeights.make(cfg.patience)] if cfg.patience else []
+    cbs += progress_cb(f"{kind}({units})", cfg.epochs)
     t0 = time.perf_counter()
     m.fit(tx, ty, epochs=cfg.epochs, batch_size=max(1, math.floor(len(tx) * cfg.batch_frac)),
           validation_data=(sp.val_x, sp.val_y), verbose=0, callbacks=cbs)
@@ -718,9 +747,10 @@ def oof_base_predictions(sp: Split, units: Tuple[int, int, int], cfg: TrainCfg, 
 
 
 def train_meta(kind: str, Xm: np.ndarray, ym: np.ndarray, cfg: TrainCfg,
-               val: Optional[Tuple[np.ndarray, np.ndarray]]):
+               val: Optional[Tuple[np.ndarray, np.ndarray]], label: Optional[str] = None):
     m = build_meta(kind, Xm.shape[1:], cfg.meta_lr)
     cbs = [BestWeights.make(cfg.meta_patience)] if (cfg.meta_patience and val is not None) else []
+    cbs += progress_cb(label or f"meta {kind}", cfg.meta_epochs)
     t0 = time.perf_counter()
     m.fit(Xm, ym, epochs=cfg.meta_epochs, validation_data=val, verbose=0, callbacks=cbs)
     return m, time.perf_counter() - t0
@@ -853,7 +883,7 @@ def baseline_benchmark(raw_company: pd.DataFrame, start: str, saudi: bool, cfg: 
     m.compile(loss="mse", optimizer=keras.optimizers.Nadam())
     t0 = time.perf_counter()
     m.fit(trx, tr_y, epochs=cfg.bench_epochs, batch_size=max(1, math.floor(len(trx) * 0.05)),
-          validation_data=(vx, v_y), verbose=0)
+          validation_data=(vx, v_y), verbose=0, callbacks=progress_cb("Benchmark GRU(256)", cfg.bench_epochs))
     tt = time.perf_counter() - t0
     p, it = predict_timed(m, tx)
     actual = np.array([test[c].values[i + N_IN:i + N_IN + N_OUT] for i in range(len(tx))])
@@ -928,6 +958,7 @@ def run_company(name: str, company: pd.DataFrame, features: List[str], target: s
         record(f"AVG({combo})", inv(ts, avg), tt, it)
 
     # ---------------- stacking ensembles ----------------
+    LOG.info(f"  stacking: training {len(META_TYPES) * len(COMBOS)} meta-learners (--stacking {rc.stacking})")
     if rc.stacking == "oof":
         LOG.info(f"  building rolling-origin OOF meta-features ({rc.oof_folds} folds)")
         oof_p, oof_y = oof_base_predictions(sp, tuple(chosen), rc.train, rc.oof_folds)
@@ -943,7 +974,8 @@ def run_company(name: str, company: pd.DataFrame, features: List[str], target: s
             else:                             # paper text: rolling-origin OOF
                 Xm, ym, vd = stack_preds([oof_p[k] for k in ks]), oof_y, (Xva, sp.val_y)
             mm, mt = train_meta(meta, Xm, ym.reshape(len(ym), N_OUT), rc.train,
-                                None if vd is None else (vd[0], vd[1].reshape(len(vd[1]), N_OUT)))
+                                None if vd is None else (vd[0], vd[1].reshape(len(vd[1]), N_OUT)),
+                                label=f"STK_{meta}({combo})")
             p, st = predict_timed(mm, Xte)
             tt = sum(times[k][0] for k in ks) + mt
             it = sum(times[k][1] for k in ks) + st
@@ -954,6 +986,7 @@ def run_company(name: str, company: pd.DataFrame, features: List[str], target: s
 
     # ---------------- baselines ----------------
     if not rc.skip_baselines:
+        LOG.info("  baselines: Random Walk, ARIMA(5,1,0), XGBoost, GRU(256) benchmark")
         p, tt, it = baseline_random_walk(sp, target)
         record("Random Walk", p, tt, it)
         p, tt, it = baseline_arima(sp, target, rolling=rc.fix_quirks)
@@ -1136,7 +1169,10 @@ def main(argv=None):
     ap.add_argument("--resume", action="store_true", help="reuse finished companies in --out-dir")
     ap.add_argument("--save-models", action="store_true")
     ap.add_argument("--quick", action="store_true", help="tiny smoke test (2 epochs, 8 units)")
+    ap.add_argument("--quiet", action="store_true", help="no per-epoch training progress lines")
     a = ap.parse_args(argv)
+    global PROGRESS
+    PROGRESS = not a.quiet
 
     setup_logging(a.out_dir)
     import tensorflow as tf
@@ -1195,9 +1231,10 @@ def main(argv=None):
             LOG.info(f"overlap with Table 4: {len(set(features) & set(SELECTED_TI_SA))}/34")
             json.dump(features, open(os.path.join(rc.out_dir, "pearson_features_saudi.json"), "w"))
         all_res, per_company = [], {}
-        for n in names:
+        for i, n in enumerate(names, 1):
             got = load_company(rc, "saudi", n) if rc.resume else None
             if got is None:
+                LOG.info(f"[{i}/{len(names)}] {n}")
                 st = SAUDI_COMPANIES[n][0]
                 if rc.feature_selection == "pearson":
                     co = full[n][features]
@@ -1219,9 +1256,10 @@ def main(argv=None):
         tickers = [t for t in US_COMPANIES if (not a.companies or t in a.companies)] or US_COMPANIES
         paths = acquire_us(rc.data_dir, tickers, a.us_dir)
         all_res, per_company = [], {}
-        for t in tickers:
+        for i, t in enumerate(tickers, 1):
             got = load_company(rc, "us", t) if rc.resume else None
             if got is None:
+                LOG.info(f"[{i}/{len(tickers)}] {t}")
                 raw_t = load_us_raw(paths[t])
                 co = engineer_us(raw_t)
                 res, d = run_company(t, co, list(SELECTED_TI_US), "Close", units_for("us", t), raw_t,

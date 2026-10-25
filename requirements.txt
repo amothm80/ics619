@@ -1,1 +1,3 @@
 pandas-ta-classic==0.8.32
+pyarrow
+yfinance
