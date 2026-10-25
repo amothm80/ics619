@@ -8,3 +8,7 @@ models
 old
 out*
 runs
+# Added by code-review-graph
+.code-review-graph/
+.claude
+.mcp.json
