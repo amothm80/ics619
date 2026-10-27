@@ -41,6 +41,6 @@ def check(df: pd.DataFrame, X: pd.DataFrame) -> None:
     assert X.index.isin(df.index).all() and X.index.equals(df.index[-len(X):]), "rows not a tail of df"
     assert (X[["open", "high", "low", "close"]] == df.loc[X.index, ["open", "high", "low", "close"]]).all().all()
     # hwma must be a real Holt-Winters MA, not the authors' ta.dema bug.
-    assert np.allclose(X["hwma"],  X["dema"]), "hwma differs from the Holt-Winters recursion"
+    # assert np.allclose(X["hwma"],  X["dema"]), "hwma differs from the Holt-Winters recursion"
     assert not np.allclose(X["hwma"], X["dema"]), "hwma equals dema"
     assert list(X.columns) == FEATURES, "feature set/order differs from the paper's 34"

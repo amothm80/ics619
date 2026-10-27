@@ -30,6 +30,23 @@ def load_ticker(ticker: str, raw: pd.DataFrame | None = None, end=config.TEST_EN
     return df   # only missing open/high/low on real trading rows
 
 
+def split(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Chronological train / val / test on the paper's dates (bounds inclusive). Never shuffled."""
+    train = df.loc[:config.TRAIN_END]
+    val = df.loc[config.VAL_START:config.VAL_END]
+    test = df.loc[config.TEST_START:config.TEST_END]
+    return train, val, test
+
+
+def check_split(df: pd.DataFrame, train: pd.DataFrame, val: pd.DataFrame, test: pd.DataFrame) -> None:
+    """Raise if the splits overlap, are out of order, or lose rows; print their sizes."""
+    assert len(train) and len(val) and len(test), "empty split"
+    assert train.index.max() < val.index.min() and val.index.max() < test.index.min(), "splits overlap"
+    assert len(train) + len(val) + len(test) == len(df.loc[:config.TEST_END]), "rows lost between splits"
+    for name, part in (("train", train), ("val", val), ("test", test)):
+        print(f"{name:5s} {len(part):5d} rows  {part.index.min().date()} .. {part.index.max().date()}")
+
+
 def check(df: pd.DataFrame) -> None:
     """Raise if the frame breaks the trading-day contract."""
     assert not df.isna().any().any(), "NaNs remain"
