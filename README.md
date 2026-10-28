@@ -48,8 +48,10 @@ python run_pipeline.py ADC STC --units 64 128 --folds 5
 | `--start` | no | `data`, `select_features`, `preprocessing`, `metrics`, `sweep`, `ensembles`, `stacking`, `baseline`, `rankings` | `data` |
 | `--units` | no | one or more integers, passed to `sweep.py` | `sweep.py`'s default |
 | `--folds` | no | integer, passed to `stacking.py` | `stacking.py`'s default |
+| `--epochs` | no | integer: max training epochs | `100` |
+| `--patience` | no | integer: early-stopping patience on val loss; `0` turns early stopping off | `20` |
 
-Runs scripts 0-9 below in order (except `train.py`, which `sweep.py` calls), with `DATA_SOURCE` set, each as its own process. Output streams to the terminal and to `artifacts/<source>/logs/<step>.log`. The run stops at the first step that fails. `select_features`, `preprocessing` and `metrics` always use all ten tickers. Feature selection must, since a feature passes only if it passes for all ten. Saved sweep runs and OOF forecasts are reused. Delete them to retrain after changing data or settings.
+Runs scripts 0-9 below in order (except `train.py`, which `sweep.py` calls), with `DATA_SOURCE` set, each as its own process. Output streams to the terminal and to `artifacts/<source>/logs/<step>.log`. The run stops at the first step that fails. `select_features`, `preprocessing` and `metrics` always use all ten tickers. Feature selection must, since a feature passes only if it passes for all ten. `--epochs` and `--patience` reach every training step through the `EPOCHS` and `PATIENCE` environment variables. That covers base models, OOF fold models (via the kept epoch), meta-learners, GRU-256, and XGBoost's early-stopping rounds. Saved sweep runs, GRU-256 and OOF forecasts are reused only if they were made with the same epochs and patience; otherwise they are retrained. Delete them to retrain after changing the data or other settings.
 
 ## Scripts, in pipeline order
 
@@ -117,7 +119,7 @@ python train.py GRU ADC --units 64
 | `TICKER` | yes | `ADC`, `ALRAJHI`, `EMAAR_EC`, `FITAIHI`, `GACO`, `SARCO`, `SEC`, `SPIMACO`, `STC`, `TASNEE` | |
 | `--units` | no | integer | `64` |
 
-Table 8 settings: Adam lr 1e-4, MSE, batch 10% of training windows, 100 epochs, early stopping on val loss (patience 20, best weights restored). Logs one line per epoch, then prints val and test RMSE next to the random walk.
+Table 8 settings: Adam lr 1e-4, MSE, batch 10% of training windows, 100 epochs, early stopping on val loss (patience 20, best weights restored). Override with the `EPOCHS` and `PATIENCE` environment variables (e.g. `EPOCHS=50 PATIENCE=0 python train.py GRU ADC`). With `PATIENCE=0` there is no early stopping and the last epoch's weights are kept. Logs one line per epoch, then prints val and test RMSE next to the random walk.
 
 ### `sweep.py`
 

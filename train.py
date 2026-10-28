@@ -6,6 +6,7 @@ Usage: python train.py GRU ADC --units 64
 """
 import argparse
 import json
+import os
 
 import joblib
 import keras
@@ -20,8 +21,9 @@ import models
 import preprocessing
 
 LR = 1e-4
-EPOCHS = 100
-PATIENCE = 20
+# Table 8 defaults; run_pipeline.py --epochs / --patience override them through the environment.
+EPOCHS = int(os.environ.get("EPOCHS", 100))
+PATIENCE = int(os.environ.get("PATIENCE", 20))  # 0: no early stopping, the last epoch's weights are kept
 BATCH_FRAC = 0.10  # batch size as a fraction of the training windows
 
 
@@ -30,16 +32,17 @@ def batch_size(n_train: int) -> int:
 
 
 def train(model: keras.Model, splits: dict, verbose: int = 2) -> keras.callbacks.History:
-    """Adam + MSE; early stopping on val loss, best-val-loss weights restored."""
+    """Adam + MSE; early stopping on val loss, best-val-loss weights restored (unless PATIENCE is 0)."""
     X, Y = splits["train"]
     model.compile(optimizer=keras.optimizers.Adam(LR), loss="mse")
-    stop = keras.callbacks.EarlyStopping(monitor="val_loss", patience=PATIENCE, restore_best_weights=True, verbose=min(verbose, 1))
+    stop = [keras.callbacks.EarlyStopping(monitor="val_loss", patience=PATIENCE, restore_best_weights=True,
+                                          verbose=min(verbose, 1))] if PATIENCE else []
     return model.fit(
         X, Y,
         validation_data=splits["val"],
         epochs=EPOCHS,
         batch_size=batch_size(len(X)),
-        callbacks=[stop],
+        callbacks=stop,
         verbose=verbose,  # 2: one line per epoch: loss, val_loss, time
     )
 
@@ -59,12 +62,17 @@ def score(model: keras.Model, splits: dict, ticker: str, names=("val", "test")) 
     return out
 
 
+def kept_epoch(val_loss: list[float], patience: int = PATIENCE) -> int:
+    """1-based epoch whose weights the model keeps: the lowest val loss, or the last with no early stopping."""
+    return min(range(len(val_loss)), key=val_loss.__getitem__) + 1 if patience else len(val_loss)
+
+
 def plot_loss(history: keras.callbacks.History, title: str, path) -> None:
     fig, ax = plt.subplots(figsize=(6, 4))
     ax.plot(history.history["loss"], label="train")
     ax.plot(history.history["val_loss"], label="val")
-    best = min(range(len(history.history["val_loss"])), key=history.history["val_loss"].__getitem__)
-    ax.axvline(best, color="grey", ls="--", lw=1, label=f"kept (epoch {best + 1})")
+    best = kept_epoch(history.history["val_loss"])
+    ax.axvline(best - 1, color="grey", ls="--", lw=1, label=f"kept (epoch {best})")
     ax.set(title=title, xlabel="epoch", ylabel="MSE (scaled)", yscale="log")
     ax.legend()
     fig.tight_layout()
@@ -81,10 +89,12 @@ def fit_and_save(kind: str, ticker: str, units: int, splits: dict, verbose: int 
     out = config.ticker_dir(ticker) / "models"
     stem = f"{kind}_{units}"
     model.save(out / f"{stem}.keras")
+    kept = kept_epoch(history.history["val_loss"])
     record = {
         "kind": kind, "units": units, "seed": config.SEED,
         "lr": LR, "epochs": EPOCHS, "patience": PATIENCE, "batch_size": batch_size(len(splits["train"][0])),
-        "epochs_run": len(history.history["loss"]), "best_val_loss": min(history.history["val_loss"]),
+        "epochs_run": len(history.history["loss"]), "kept_epoch": kept,
+        "best_val_loss": history.history["val_loss"][kept - 1],  # val loss of the kept weights
         "history": history.history, "results": score(model, splits, ticker, names),
     }
     (out / f"{stem}.json").write_text(json.dumps(record, indent=2))

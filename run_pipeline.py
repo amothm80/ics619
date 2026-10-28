@@ -4,6 +4,7 @@ Each step is its own script, run as a subprocess with DATA_SOURCE set; its outpu
 terminal and to artifacts/<source>/logs/<step>.log. The run stops at the first step that fails.
 Steps that cache their work (sweep.py, stacking.py) reuse it, so a stopped run can resume with --start.
 Usage: python run_pipeline.py [TICKER ...] [--source S] [--start STEP] [--units N ...] [--folds K]
+                              [--epochs N] [--patience N]
 """
 import argparse
 import os
@@ -43,14 +44,20 @@ def main() -> None:
     p.add_argument("--start", choices=STEPS, default=STEPS[0], help="skip the steps before this one")
     p.add_argument("--units", type=int, nargs="+", help="sweep.py unit grid (default: its own)")
     p.add_argument("--folds", type=int, help="stacking.py folds (default: its own)")
+    p.add_argument("--epochs", type=int, help="max training epochs (default: train.py's, 100)")
+    p.add_argument("--patience", type=int, help="early-stopping patience, 0 = off (default: train.py's, 20)")
     args = p.parse_args()
 
     os.environ["DATA_SOURCE"] = args.source  # read by config.py here and in every step
+    for name in ("epochs", "patience"):  # read by train.py in every step that trains
+        if getattr(args, name) is not None:
+            os.environ[name.upper()] = str(getattr(args, name))
     import config
 
     if unknown := set(args.tickers) - set(config.TICKERS):
         p.error(f"unknown tickers: {sorted(unknown)}")
-    print(f"source {config.SOURCE}: artifacts in {config.ARTIFACTS_DIR.relative_to(ROOT)}")
+    print(f"source {config.SOURCE}: artifacts in {config.ARTIFACTS_DIR.relative_to(ROOT)}; "
+          f"epochs {os.environ.get('EPOCHS', 100)}, patience {os.environ.get('PATIENCE', 20)}")
     for step in STEPS[STEPS.index(args.start):]:
         extra = list(args.tickers) if step in TAKES_TICKERS else []
         if step == "sweep" and args.units:

@@ -12,6 +12,7 @@ Usage: python baseline.py [TICKER ...]
 """
 import argparse
 import itertools
+import json
 import warnings
 
 import joblib
@@ -54,20 +55,23 @@ def arima_forecast(close: np.ndarray, n_train: int, origins: dict, h: int = conf
 
 
 def xgb_forecast(ticker: str, splits: dict) -> tuple[int, dict]:
-    """Multi-output XGBoost on flattened windows. Returns (best iteration, {split: scaled forecasts})."""
+    """Multi-output XGBoost on flattened windows. Returns (trees kept, {split: scaled forecasts})."""
     flat = {s: (X.reshape(len(X), -1), Y) for s, (X, Y) in splits.items()}
     model = XGBRegressor(n_estimators=1000, learning_rate=0.05, max_depth=6, tree_method="hist",
-                         early_stopping_rounds=train.PATIENCE, random_state=config.SEED)
+                         early_stopping_rounds=train.PATIENCE or None, random_state=config.SEED)
     print(f"--- {ticker} XGBoost: training (train / val RMSE, scaled, every 10 trees)")
     model.fit(*flat["train"], eval_set=[flat["train"], flat["val"]], verbose=10)
     joblib.dump(model, config.ticker_dir(ticker) / "models" / "XGB.joblib")
-    return model.best_iteration, {s: model.predict(flat[s][0]) for s in SPLITS}
+    trees = model.best_iteration + 1 if train.PATIENCE else model.n_estimators
+    return trees, {s: model.predict(flat[s][0]) for s in SPLITS}
 
 
 def gru256_forecast(ticker: str, splits: dict) -> dict:
-    """{split: scaled forecasts} from models/GRU_256.keras, trained first if absent."""
+    """{split: scaled forecasts} from models/GRU_256.keras, trained first if absent or made with other settings."""
     path = config.ticker_dir(ticker) / "models" / "GRU_256.keras"
-    if not path.exists():
+    rec = path.with_suffix(".json")
+    rec = json.loads(rec.read_text()) if rec.exists() else {}
+    if not path.exists() or (rec.get("epochs"), rec.get("patience")) != (train.EPOCHS, train.PATIENCE):
         print(f"--- {ticker} GRU_256: training")
         train.fit_and_save("GRU", ticker, 256, splits)
     model = keras.models.load_model(path)
@@ -86,7 +90,7 @@ def score_ticker(ticker: str, raw: pd.DataFrame) -> list[dict]:
         assert np.allclose(close[idx[:, None] + np.arange(1, config.H + 1)], y[s])
 
     order, arima = arima_forecast(close, len(df.loc[:config.TRAIN_END]), origins)
-    best_it, xgb = xgb_forecast(ticker, splits)
+    trees, xgb = xgb_forecast(ticker, splits)
     preds = {
         "ARIMA": arima,
         "XGBoost": {s: metrics.to_price(y_scaler, p) for s, p in xgb.items()},
@@ -94,7 +98,7 @@ def score_ticker(ticker: str, raw: pd.DataFrame) -> list[dict]:
     }
     np.savez(config.ticker_dir(ticker) / "baselines.npz",
              **{f"{s}_y": y[s] for s in SPLITS}, **{f"{s}_{m}": p[s] for m, p in preds.items() for s in SPLITS})
-    print(f"{ticker:8s} ARIMA{order}  XGBoost {best_it + 1} trees")
+    print(f"{ticker:8s} ARIMA{order}  XGBoost {trees} trees")
     return [{"ticker": ticker, "split": s, "model": m, **metrics.evaluate(y[s], p[s])} for m, p in preds.items() for s in SPLITS]
 
 

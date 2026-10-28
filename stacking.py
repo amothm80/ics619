@@ -59,21 +59,25 @@ def check_folds(fold_list, w: int = config.W, h: int = config.H) -> None:
 
 
 def best_epoch(ticker: str, kind: str, units: int) -> int:
-    """Step 9's kept epoch (lowest validation loss) for this ticker's selected model."""
-    hist = json.loads((config.ticker_dir(ticker) / "models" / f"{kind}_{units}.json").read_text())["history"]
-    return int(np.argmin(hist["val_loss"])) + 1
+    """Step 9's kept epoch for this ticker's selected model (lowest val loss, or the last without early stopping)."""
+    rec = json.loads((config.ticker_dir(ticker) / "models" / f"{kind}_{units}.json").read_text())
+    return rec.get("kept_epoch") or train.kept_epoch(rec["history"]["val_loss"], rec["patience"])
 
 
 def oof_predictions(ticker: str, splits: dict, k: int = K) -> dict:
     """{kind: (n_oof, H) forecasts, "Y": (n_oof, H) truth, "idx": window indices}, scaled units. Cached."""
     path = config.ticker_dir(ticker) / f"oof_k{k}_init{round(INITIAL * 100)}.npz"
+    settings = np.array([train.EPOCHS, train.PATIENCE])
     if path.exists():
-        return dict(np.load(path))
+        cached = dict(np.load(path))
+        if (cached.get("settings", np.array([100, 20])) == settings).all():  # files without it used the defaults
+            return cached
+        print(f"{ticker}: OOF cache made with other epochs/patience, recomputing")
     chosen = json.loads((config.ticker_dir(ticker) / "config.json").read_text())["models"]
     X, Y = splits["train"]
     fold_list = folds(len(X), k)
     check_folds(fold_list)
-    out = {"idx": np.concatenate([p for _, p in fold_list])}
+    out = {"idx": np.concatenate([p for _, p in fold_list]), "settings": settings}
     out["Y"] = Y[out["idx"]]
     for kind in KINDS:
         units = chosen[kind]["units"]

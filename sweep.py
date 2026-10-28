@@ -26,7 +26,8 @@ def sweep_ticker(ticker: str, units: list[int], raw: pd.DataFrame) -> list[dict]
         for u in units:
             path = config.ticker_dir(ticker) / "models" / f"{kind}_{u}.json"
             rec = json.loads(path.read_text()) if path.exists() else {}
-            if "best_val_loss" not in rec:  # missing, or saved by an older train.py
+            stale = (rec.get("epochs"), rec.get("patience")) != (train.EPOCHS, train.PATIENCE)
+            if "best_val_loss" not in rec or stale:  # missing, from an older train.py, or other settings
                 print(f"--- {ticker} {kind}_{u}: training")
                 rec = train.fit_and_save(kind, ticker, u, splits, names=("val",))
             val = rec["results"]["val"]["model"]
