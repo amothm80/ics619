@@ -27,11 +27,12 @@ def sweep_ticker(ticker: str, units: list[int], raw: pd.DataFrame) -> list[dict]
             path = config.ticker_dir(ticker) / "models" / f"{kind}_{u}.json"
             rec = json.loads(path.read_text()) if path.exists() else {}
             if "best_val_loss" not in rec:  # missing, or saved by an older train.py
-                rec = train.fit_and_save(kind, ticker, u, splits, verbose=0, names=("val",))
+                print(f"--- {ticker} {kind}_{u}: training")
+                rec = train.fit_and_save(kind, ticker, u, splits, names=("val",))
             val = rec["results"]["val"]["model"]
             rows.append({"ticker": ticker, "kind": kind, "units": u, "epochs_run": rec["epochs_run"],
                          "val_loss": rec["best_val_loss"], **{f"val_{k}": v for k, v in val.items()}})
-            print(f"{ticker:8s} {kind:5s} {u:4d}  epochs {rec['epochs_run']:3d}  val RMSE {val['RMSE']:.4f}", flush=True)
+            print(f"{ticker:8s} {kind:5s} {u:4d}  epochs {rec['epochs_run']:3d}  val RMSE {val['RMSE']:.4f}")
     return rows
 
 

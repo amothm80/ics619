@@ -12,3 +12,4 @@ runs
 .code-review-graph/
 .claude
 .mcp.json
+env

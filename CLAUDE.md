@@ -77,6 +77,7 @@
 12. **Evaluation.**
     - Metrics: MAE, MSE, RMSE and MRE on inverse-scaled prices.
     - Significance: pairwise Wilcoxon signed-rank tests on RMSE over non-overlapping 5-step windows, Holm–Bonferroni corrected, α = 0.05, summarized as win/loss counts.
+13. For every script created, updaet README.MD with description and arguments
 
 ### Headline results
 - Ensembles beat the standalone models on every metric. GRU is the best standalone model.

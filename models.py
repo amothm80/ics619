@@ -19,3 +19,16 @@ def build_rnn(kind: str, units: int, n_features: int, w: int = config.W, h: int 
          layers.Dense(h)],
         name=f"{kind}_{units}",
     )
+
+
+def build_ann(n_base: int, h: int = config.H) -> keras.Model:
+    """Stacking meta-learner: (h, n_base) base forecasts -> Dense 128 -> 64 -> 32 (ReLU) -> h closes."""
+    return keras.Sequential(
+        [keras.Input((h, n_base)),
+         layers.Flatten(),
+         layers.Dense(128, activation="relu"),
+         layers.Dense(64, activation="relu"),
+         layers.Dense(32, activation="relu"),
+         layers.Dense(h)],
+        name="ANN",
+    )
