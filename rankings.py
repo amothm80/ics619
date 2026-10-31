@@ -1,13 +1,15 @@
 """Step 13: significance testing and results tables on the test split.
 
-Per ticker, every model's test forecasts are cut into non-overlapping 5-step windows (every H-th
-stride-1 window), giving one RMSE per window. Each pair of models is compared with a Wilcoxon
+Per ticker, every model's test forecasts are scored as one RMSE per 5-step window, using either
+non-overlapping windows (every H-th stride-1 window, as in the paper) or all overlapping stride-1
+windows. Overlapping windows share targets, so their RMSEs are autocorrelated and the Wilcoxon
+p-values are optimistic; use them as a sensitivity check, not in place of the paper's test. Each pair of models is compared with a Wilcoxon
 signed-rank test on those paired RMSEs; the p-values of all pairs within a ticker are
 Holm-Bonferroni corrected. A pair is a win for the model with the lower mean RMSE when the
 corrected p < ALPHA, otherwise a tie. Counts are summed over tickers.
 Nothing is fitted here. Forecasts come from forecasts.npz (base models), baselines.npz, the saved
 stacking meta-learners and the random walk; their RMSEs are checked against the earlier CSVs.
-Usage: python rankings.py [TICKER ...]
+Usage: python rankings.py [TICKER ...] [--windows non-overlapping|overlapping|both]
 """
 import argparse
 import itertools
@@ -27,6 +29,8 @@ import preprocessing
 import stacking
 
 ALPHA = 0.05
+STEPS = {"non-overlapping": config.H, "overlapping": 1}  # stride between scored windows
+SUFFIX = {"non-overlapping": "", "overlapping": "_overlap"}  # output file name suffix
 
 
 def test_forecasts(ticker: str, raw: pd.DataFrame) -> tuple[np.ndarray, dict]:
@@ -62,9 +66,9 @@ def check_against_csvs(ticker: str, y: np.ndarray, preds: dict) -> None:
         assert np.isclose(metrics.rmse(y, p), saved[m], rtol=1e-4), f"{ticker} {m}: RMSE differs from saved"
 
 
-def window_rmse(y: np.ndarray, p: np.ndarray, h: int = config.H) -> np.ndarray:
-    """RMSE of each non-overlapping h-step window: stride-1 windows 0, h, 2h, ..."""
-    return np.sqrt(((y[::h] - p[::h]) ** 2).mean(axis=1))
+def window_rmse(y: np.ndarray, p: np.ndarray, step: int = config.H) -> np.ndarray:
+    """RMSE of every step-th stride-1 window: step H gives non-overlapping windows, 1 all of them."""
+    return np.sqrt(((y[::step] - p[::step]) ** 2).mean(axis=1))
 
 
 def pairwise(ticker: str, rmse: dict) -> pd.DataFrame:
@@ -102,32 +106,43 @@ def check_pairwise() -> None:
     assert wl.loc["good", ["wins", "losses", "ties"]].tolist() == [1, 0, 1] and wl.loc["bad", "win_rate"] == 0
 
 
+def report(mode: str, forecasts: dict) -> None:
+    """Wilcoxon win/loss and mean metrics for one window mode; saves both tables."""
+    pairs, metric_rows = [], []
+    for t, (y, preds) in forecasts.items():
+        rmse = {m: window_rmse(y, f, STEPS[mode]) for m, f in preds.items()}
+        pairs.append(pairwise(t, rmse))
+        metric_rows += [{"ticker": t, "model": m, **metrics.evaluate(y, f)} for m, f in preds.items()]
+        print(f"{t:8s} {len(preds)} models, {len(rmse['GRU'])} {mode} test windows")
+    pairs = pd.concat(pairs, ignore_index=True)
+    table = pd.DataFrame(metric_rows).groupby("model")[["MAE", "MSE", "RMSE", "MRE"]].mean()
+    table = win_loss(pairs).join(table)
+
+    pairs_csv, table_csv = (f"{f}{SUFFIX[mode]}.csv" for f in ("wilcoxon_pairs", "results_test"))
+    pairs.to_csv(config.ARTIFACTS_DIR / pairs_csv, index=False)
+    table.to_csv(config.ARTIFACTS_DIR / table_csv)
+    pd.set_option("display.float_format", "{:.4f}".format)
+    print(f"\ntest, {mode} windows: Wilcoxon win/loss over {len(forecasts)} tickers (Holm, alpha {ALPHA}), "
+          "mean metrics over tickers")
+    print(table.to_string())
+    print(f"saved {pairs_csv}, {table_csv} in {config.ARTIFACTS_DIR}\n")
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("tickers", nargs="*", default=list(config.TICKERS))
+    p.add_argument("--windows", choices=[*STEPS, "both"], default="non-overlapping")
     args = p.parse_args()
     check_pairwise()
 
     raw = data.load_raw()
-    pairs, metric_rows = [], []
+    forecasts = {}
     for t in args.tickers:
         y, preds = test_forecasts(t, raw)
         check_against_csvs(t, y, preds)
-        rmse = {m: window_rmse(y, f) for m, f in preds.items()}
-        pairs.append(pairwise(t, rmse))
-        metric_rows += [{"ticker": t, "model": m, **metrics.evaluate(y, f)} for m, f in preds.items()]
-        print(f"{t:8s} {len(preds)} models, {len(rmse['GRU'])} non-overlapping test windows")
-    pairs = pd.concat(pairs, ignore_index=True)
-    wl = win_loss(pairs)
-    table = pd.DataFrame(metric_rows).groupby("model")[["MAE", "MSE", "RMSE", "MRE"]].mean()
-    table = wl.join(table)
-
-    pairs.to_csv(config.ARTIFACTS_DIR / "wilcoxon_pairs.csv", index=False)
-    table.to_csv(config.ARTIFACTS_DIR / "results_test.csv")
-    pd.set_option("display.float_format", "{:.4f}".format)
-    print(f"\ntest: Wilcoxon win/loss over {len(args.tickers)} tickers (Holm, alpha {ALPHA}), mean metrics over tickers")
-    print(table.to_string())
-    print("saved artifacts/wilcoxon_pairs.csv, artifacts/results_test.csv")
+        forecasts[t] = (y, preds)
+    for mode in (STEPS if args.windows == "both" else [args.windows]):
+        report(mode, forecasts)
 
 
 if __name__ == "__main__":

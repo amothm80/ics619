@@ -13,3 +13,4 @@ runs
 .claude
 .mcp.json
 env
+final_model

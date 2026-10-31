@@ -68,7 +68,8 @@ Run each step after the one before it; later steps read the artifacts earlier st
 | 6 | `ensembles.py` | `[TICKER ...]` | Averaging ensembles of the selected models | `artifacts/<source>/ensembles_avg.csv`, `artifacts/<source>/<ticker>/forecasts.npz` |
 | 7 | `stacking.py` | `[TICKER ...] [--folds K]` | Rolling-origin OOF forecasts, then 12 stacking meta-learners | `artifacts/<source>/ensembles_stk.csv`, `artifacts/<source>/<ticker>/oof_k<K>_init50.npz`, `models/STK_*.keras` |
 | 8 | `baseline.py` | `[TICKER ...]` | ARIMA, XGBoost and GRU-256 baselines, plus a test ranking of every model so far | `artifacts/<source>/baselines.csv`, `artifacts/<source>/<ticker>/baselines.npz`, `models/XGB.joblib` |
-| 9 | `rankings.py` | `[TICKER ...]` | Pairwise Wilcoxon tests on non-overlapping 5-step test windows, Holm-corrected, win/loss counts and mean metrics | `artifacts/<source>/wilcoxon_pairs.csv`, `artifacts/<source>/results_test.csv` |
+| 9 | `rankings.py` | `[TICKER ...] [--windows MODE]` | Pairwise Wilcoxon tests on non-overlapping and/or overlapping 5-step test windows, Holm-corrected, win/loss counts and mean metrics | `artifacts/<source>/wilcoxon_pairs[_overlap].csv`, `artifacts/<source>/results_test[_overlap].csv` |
+| 10 | `export_final.py` | `[TICKER ...]` | Picks each ticker's lowest-test-RMSE model (ARIMA, random walk, XGBoost excluded), exports it with its scalers for the web app, and checks the export | `final_model/manifest.json`, `final_model/<ticker>/` |
 
 ### `data.py`
 
@@ -182,15 +183,41 @@ Prints val/test RMSE per ticker, then ranks every model in `baseline_random_walk
 ### `rankings.py`
 
 ```bash
-python rankings.py
-python rankings.py ADC STC
+python rankings.py                      # non-overlapping windows (the paper's test)
+python rankings.py --windows overlapping
+python rankings.py ADC STC --windows both
 ```
 
 | Argument | Required | Values | Default |
 |---|---|---|---|
 | `TICKER ...` | no | tickers with `forecasts.npz`, `baselines.npz` and stacking models | all ten |
+| `--windows` | no | `non-overlapping`, `overlapping`, `both` | `non-overlapping` |
 
-Collects the test forecasts of all 23 models per ticker. Sources: `forecasts.npz` (base models and averages), the saved `STK_*` meta-learners, `baselines.npz`, and the random walk. It checks each RMSE against the earlier CSVs. It keeps every 5th stride-1 window (non-overlapping 5-step blocks) and scores one RMSE per block. Every model pair gets a Wilcoxon signed-rank test, and the p-values within each ticker are Holm-Bonferroni corrected (alpha 0.05). Each pair is a win for the model with the lower mean RMSE, or a tie if not significant. Identical forecasts count as a tie. Prints wins, losses, ties and win rate = wins / (wins + losses), summed over tickers, next to mean MAE, MSE, RMSE and MRE. Run steps 3, 6, 7 and 8 first.
+Collects the test forecasts of all 23 models per ticker. Sources: `forecasts.npz` (base models and averages), the saved `STK_*` meta-learners, `baselines.npz`, and the random walk. It checks each RMSE against the earlier CSVs. It scores one RMSE per 5-step window. `non-overlapping` keeps every 5th stride-1 window (non-overlapping 5-step blocks, as in the paper). `overlapping` keeps every stride-1 window, about 5 times as many. Overlapping windows share target days, so their RMSEs are correlated and the p-values are too small. Use that mode as a sensitivity check only. Every model pair gets a Wilcoxon signed-rank test, and the p-values within each ticker are Holm-Bonferroni corrected (alpha 0.05). Each pair is a win for the model with the lower mean RMSE, or a tie if not significant. Identical forecasts count as a tie. Prints wins, losses, ties and win rate = wins / (wins + losses), summed over tickers, next to mean MAE, MSE, RMSE and MRE. The mean metrics use all stride-1 windows in both modes, so only the win/loss columns differ. Non-overlapping results go to `wilcoxon_pairs.csv` and `results_test.csv`; overlapping results get an `_overlap` suffix. Run steps 3, 6, 7 and 8 first.
+
+### `export_final.py`
+
+```bash
+DATA_SOURCE=yfinance_recent python export_final.py
+DATA_SOURCE=yfinance_recent python export_final.py ADC STC
+```
+
+| Argument | Required | Values | Default |
+|---|---|---|---|
+| `TICKER ...` | no | any of the ten tickers | all ten |
+
+For each ticker, it picks the model with the lowest mean test RMSE. Candidates are the base models, GRU-256, the averages and the stacking ensembles. ARIMA is excluded by project decision. The random walk and XGBoost are excluded because the app forecaster runs Keras models only. The test set chose these models, so their test scores are optimistic. The script copies the chosen model files, the scalers and `features.json` to `final_model/<ticker>/`, and writes `model.json` (model, kind, members, val/test metrics, runner-up, ARIMA RMSE for reference). It also writes `final_model/manifest.json` with the shared settings and package versions. It then reloads every bundle through the standalone `final_model/forecaster.py`. That check asserts the bundle's features match `features.py` and its test RMSE matches the saved one (rtol 1e-4). It also prints how much the forecast moves when only the last 250 rows are given. Needs steps 3, 6, 7 and 8 first. `final_model/README.md` describes the bundle for the app repo. `run_pipeline.py` does not run this step.
+
+## App
+
+### `app/app.py`
+
+```bash
+pip install -r app/requirements.txt
+streamlit run app/app.py
+```
+
+No arguments. A Streamlit page that uses the `final_model/` bundles through `final_model/forecaster.py`. Pick a ticker in the sidebar. The page downloads about 2 years of Yahoo history and shows the last close, the 5-day forecast (chart and table), and the model's test scores. Prices are cached for an hour; **Refresh prices** clears the cache. Each ticker's models are loaded once per server process.
 
 ## Proofs of concept
 
