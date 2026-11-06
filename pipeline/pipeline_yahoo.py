@@ -280,6 +280,16 @@ def oof_predictions(Xwtr, ywtr, seed=42):
         y_blocks.append(ywtr[block_sl])
     return np.concatenate(X_blocks), np.concatenate(y_blocks)
 
+def rw_paper_pred(Xw, h=5):
+    """Authors' random walk: drift = mean change over the window's last 5 closes."""
+    c = Xw[:, :, FEATURES.index('close')]
+    drift = np.diff(c, axis=1).mean(axis=1, keepdims=True)
+    return c[:, -1:] + drift * np.arange(1, h + 1)
+
+def arima_paper_pred(y_fit, n_windows, order=(5, 1, 0), h=5):
+    """Authors' ARIMA: one forecast from the end of train, repeated for every window."""
+    f = ARIMA(y_fit.values, order=order).fit().forecast(h)
+    return np.tile(f, (n_windows, 1))
 def run_ticker(symbol, seed=42):
     keras.backend.clear_session()                        # free memory from the previous ticker
     (xtr, ytr), (xva, yva), (xte, yte), _, ys = prepare(raw, symbol)
@@ -309,7 +319,9 @@ def run_ticker(symbol, seed=42):
     order = min(aic, key=aic.get)
     pv['ARIMA'] = arima_pred(ytr, yva, order)
     pt['ARIMA'] = arima_pred(ytr, yte, order, y_between=yva)
-
+    pv['RW (paper)'], pt['RW (paper)'] = rw_paper_pred(Xwva), rw_paper_pred(Xwte)
+    pv['ARIMA (paper)'] = arima_paper_pred(ytr, len(Xwva))
+    pt['ARIMA (paper)'] = arima_paper_pred(ytr, len(Xwte))
     xgb = XGBRegressor(n_estimators=2000, learning_rate=0.05, max_depth=4,
                        tree_method='hist', early_stopping_rounds=50, random_state=seed)
     xgb.fit(flat(Xwtr), ywtr, eval_set=[(flat(Xwva), ywva)], verbose=False)
@@ -321,7 +333,6 @@ def run_ticker(symbol, seed=42):
     val  = pd.DataFrame({k: metrics(p, ywva, ys) for k, p in pv.items()}).T
     test = pd.DataFrame({k: metrics(p, ywte, ys) for k, p in pt.items()}).T
     return val, test, win_loss(pt, ywte, ys), order
-
 
 def main():
     for name, sym in SYMBOLS.items():
