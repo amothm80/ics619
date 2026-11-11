@@ -236,6 +236,48 @@ python PoC/sahmk_history.py 7010 --from 2010-01-01
 
 Downloads one ticker's full daily OHLCV history from the SAHMK API (`GET /historical/{symbol}/`, `interval=1d`). It pages 2000 bars at a time while `has_more` is true, and retries on HTTP 429 after `Retry-After`. It checks the row count against the API's `total`. Saves the rows as returned to `PoC/data/<symbol>_1d.csv` (date, OHLC, volume, `adjusted_close`, `turnover`, `trade_count`) and the response metadata to `<symbol>_1d.json`. Prints the date range and rows per weekday, to check the pre-2013 Saturday sessions.
 
+## Change-target pipeline (`new_pipeline/`)
+
+### `new_pipeline/pipeline_returns.py`
+
+Change-target variant of `pipeline/pipeline_yahoo.py` (which is unchanged). Paths are relative to the script, so it runs from any folder. It needs `tasi_symbols.csv` next to it, and caches Yahoo data in `new_pipeline/data/yfinance/`.
+
+```bash
+python pipeline_returns.py --mode data --tickers all      # data checks + naive reference
+python pipeline_returns.py --mode per_ticker              # one model set per paper ticker
+python pipeline_returns.py --mode sweep_global            # unit sizes for the global models
+python pipeline_returns.py --mode global                  # one model set for all tickers
+```
+
+| Argument | Required | Values | Default |
+|---|---|---|---|
+| `--mode` | no | `data`, `per_ticker`, `sweep_global`, `global` | `data` |
+| `--tickers` | no | `paper` (the ten paper tickers), `all` (`tasi_symbols.csv` without REITs) | `paper` for `data`/`per_ticker`, `all` for `sweep_global`/`global` |
+| `--refresh` | no | flag: download every Yahoo history again | off |
+| `--batch` | no | integer: batch size of the global models | `2048` |
+| `--seed` | no | integer | `42` |
+
+Changes from `pipeline_yahoo.py`:
+1. **Data.** Prices are dividend-adjusted with Yahoo's Adj Close. Zero-volume rows (Yahoo placeholders) are dropped. A ticker's history is cut at its last daily move above 25%, since Tadawul's limit is ±10% (the first 5 days after listing are exempt). A ticker needs at least 500 train, 200 val and 250 test rows (at least 50 non-overlapping test windows for the Wilcoxon tests). Split dates are as in `pipeline_yahoo.py`, with the test end fixed at 2026-10-28.
+2. **Target and inputs.** The model predicts the next 5 closes as returns relative to the last input close. The paper's 34 indicators become scale-free: each one is divided by the close, minus 1, and the close itself becomes the daily log return.
+3. **Global mode.** All base models (BiRNN, GRU, LSTM, iTransformer, DA-RNN) are trained once on the pooled training windows of all usable tickers, with scalers fitted on the pooled train rows and early stopping on the pooled val windows. Batch size is fixed (`--batch`), since 10% of the pooled set would give only 10 updates per epoch. No stacking in this mode. Unit sizes come from `sweep_global`, which trains BiRNN {64, 128}, GRU {16, 64, 128}, LSTM {16, 64, 128}, iTransformer (d_model) {32, 64, 128} and DA-RNN {32, 64, 128} on the same pooled data and picks the lowest pooled val loss per architecture. Without a sweep, `global` uses the per-ticker sizes (BiRNN-128, GRU-16, LSTM-16, iTransformer d_model 64, DA-RNN 64).
+4. **Shrinkage.** `SHR_<model>` = last close + λ × (model − last close) for the base models and the averages. λ ∈ {0, 0.05, …, 1} is chosen per ticker on val RMSE.
+5. **iTransformer (T)** (Liu et al., ICLR 2024) as a fourth base model. Each of the 34 input series becomes one token (its 5 values embedded to d_model). Two post-norm encoder layers (4 heads, GELU feed-forward of width 2 × d_model, dropout 0.1) attend across the series. The forecast is read from the log-return token. 
+6. **DA-RNN (D)** (Qin et al., IJCAI 2017), the dual-stage attention RNN. An LSTM encoder (64 units) weights the 34 input series at each day by input attention, conditioned on its previous state. An LSTM decoder (64 units) runs over the log-return series with temporal attention over all encoder states. Dense layers on [d; c] give the 5-step forecast in one pass (the paper predicts one step). The LSTMs use tanh, as in the paper, not ReLU. It is a custom Keras layer (`DARNN`), registered so saved models reload.
+
+The new models join the averages as AVG(G,T), AVG(G,D) and AVG(B,G,L,T,D), stacking as the combination (B,G,L,T,D) with all three meta-learners, and shrinkage. The paper's averages and stacking combinations are unchanged.
+
+Errors are in SAR on Yahoo's Close (split-adjusted, not dividend-adjusted), so the tables compare with `results_yahoo/`. `per_ticker` runs the full framework (bases, averages, OOF stacking, XGBoost, GRU-256) plus the baselines (Naive, RW drift, RW (paper), ARIMA (paper), rolling ARIMA). `global` runs the bases, the averages and the baselines (rolling ARIMA on the paper tickers only).
+
+Writes to `results_returns/`:
+- `data_report.csv`: per ticker, the placeholder rows dropped, moves above 10%, the cut date, rows per split, status, and naive test RMSE.
+- `per_ticker/` and `global/`: `<ticker>_{val,test}.csv` (MAE, MSE, RMSE, MRE, % vs naive), `<ticker>_winloss.csv` (Wilcoxon, Holm), and `<ticker>_lambda.csv`.
+- `summary_<set>.csv` (mean and median % vs naive, tickers beating naive, pooled win/loss/tie) and `vs_naive_<set>.csv` (% vs naive per ticker and model). The set is `all`, plus `paper` in global mode.
+- `global/unit_sweep.csv` (val loss per architecture and size) and `global/units.json` (chosen sizes).
+- `global/models/<arch>_<units>.keras`: every trained global model. `global` reuses the sweep's models instead of retraining. Delete them to retrain.
+
+`per_ticker` skips tickers whose `_winloss.csv` exists, so it resumes after a crash.
+
 ## Library modules (not run directly)
 
 `config.py` (settings, data source, seeds), `data.py` (load from Kaggle or Yahoo, split; also runnable, see above), `features.py` (indicators), `models.py` (`build_rnn`).
